@@ -2,8 +2,11 @@ import os
 import asyncio
 import utils
 
+from datetime import datetime, timezone
+from dateutil import parser
+
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import praw
 from praw.models import Message
@@ -36,6 +39,13 @@ cid = credentials.readline().strip()
 csc = credentials.readline().strip()
 usn = credentials.readline().strip()
 pwd = credentials.readline().strip()
+
+new_modmail_check_frequency_seconds = 3600
+all_modmail_check_frequency_minutes = 10080
+
+review_channel_id = 705624655649833082
+modmail_new_active_channel_id = 1082072137394831490
+modmail_all_active_channel_id = 1082076792753487942
 
 def ADD_USER_RATING(username, rating, url):
 	# get the wikipage
@@ -449,9 +459,7 @@ def parseReview(submission):
 		return [-1,submission.author.name,red+submission.permalink]
 
 async def processReviews(ctx, newReviews):
-#review channel id 705624655649833082
-#coding channel id 785934949945049158
-	reviewChannel = bot.get_channel(705624655649833082)
+	reviewChannel = bot.get_channel(review_channel_id)
 	cantParse=""
 	modReview=""
 	if newReviews:
@@ -484,7 +492,7 @@ async def processReviews(ctx, newReviews):
 	
 async def getPastReviews(ctx):
 	pastReviews = []
-	channel = bot.get_channel(705624655649833082)
+	channel = bot.get_channel(review_channel_id)
 	async for message in channel.history(limit=300):
 		if(message.author.name == "Planty Bot" and "executed successfully" in message.content and not currentReviewThread in message.content):
 			txt = message.content.replace("`","").split()
@@ -497,6 +505,12 @@ def START_DISCORD_BOT():
 	TOKEN = open("discord.txt", "r").readline().strip()
 
 	bot = commands.Bot(command_prefix=',')
+
+	@bot.event
+	async def on_ready():
+		retrieveAllActiveModmailConversations.start()
+		retrieveUpdatedActiveModmailConversations.start()
+
 
 	@bot.command(name='r')
 	@commands.has_role('Reviews')
@@ -556,6 +570,63 @@ def START_DISCORD_BOT():
 			await processReviews(ctx,newReviews)
 		else:
 			await ctx.send("Invalid arguments. Please include the number of reviews you want to fetch")
+
+	@tasks.loop(seconds = new_modmail_check_frequency_seconds)
+	async def retrieveUpdatedActiveModmailConversations():
+		for active_modmail_conversation in reddit.subreddit("Takeaplantleaveaplant").modmail.conversations():
+			conversation_last_updated = parser.parse(active_modmail_conversation.last_updated)
+
+			if (datetime.now(timezone.utc) - conversation_last_updated).total_seconds() <= new_modmail_check_frequency_seconds:
+				await displayActiveModMailConversation("NEW/UPDATED ALERT", active_modmail_conversation, modmail_new_active_channel_id)
+
+	@tasks.loop(minutes = all_modmail_check_frequency_minutes)
+	async def retrieveAllActiveModmailConversations():
+		for active_modmail_conversation in reddit.subreddit("Takeaplantleaveaplant").modmail.conversations():
+			await displayActiveModMailConversation("WEEKLY ALERT", active_modmail_conversation, modmail_all_active_channel_id)
+
+	async def displayActiveModMailConversation(title_banner, active_modmail_conversation, discord_channel_id):
+		discordChannel = bot.get_channel(discord_channel_id)
+
+		conversation_id = active_modmail_conversation.id
+		conversation_redditor_authors = active_modmail_conversation.authors
+		conversation_redditor_participant = active_modmail_conversation.participant
+		conversation_subject = active_modmail_conversation.subject
+		conversation_num_messages = active_modmail_conversation.num_messages
+		conversation_is_highlighted = active_modmail_conversation.is_highlighted
+		conversation_is_internal = active_modmail_conversation.is_internal
+		conversation_last_updated = active_modmail_conversation.last_updated
+		conversation_last_user_update = active_modmail_conversation.last_user_update
+		conversation_last_mod_update = active_modmail_conversation.last_mod_update
+		conversations_messages = active_modmail_conversation.messages
+
+		discord_message = f"METADATA"
+		discord_message = f"{discord_message}\n- Subject: {conversation_subject}"
+		discord_message = f"{discord_message}\n- Modmail Conversation ID: {conversation_id}"
+		discord_message = f"{discord_message}\n- Number of Messages: {conversation_num_messages}"
+		discord_message = f"{discord_message}\n- Is Internal?: {conversation_is_internal}"
+		discord_message = f"{discord_message}\n- Is Highlighted?: {conversation_is_highlighted}"
+		discord_message = f"{discord_message}\n- Last Updated: {conversation_last_updated}"
+		discord_message = f"{discord_message}\n- Last User Update: {conversation_last_user_update}"
+		discord_message = f"{discord_message}\n- Last Mod Update: {conversation_last_mod_update}"
+		discord_message = f"{discord_message}\n"
+
+		for message in conversations_messages:
+			message_author = "u/" + message.author.name
+			message_body = message.body_markdown
+			discord_message = f"{discord_message}\n\nMESSAGE\nFROM: {message_author}\nAT: {message.date}\n{message_body}"
+
+
+		discord_embed_char_limit = 3000 # Making this less than the 4096 limit to account for the possibility of multi-byte characters.
+		discord_embed_n_messages = len(discord_message)//discord_embed_char_limit + 1
+
+		for i in range(0, discord_embed_n_messages):
+			discord_message_title = f"[{title_banner}] Active Modmail: '{conversation_subject}'"
+
+			if i > 0:
+				discord_message_title = f"((CONTINUED)) {discord_message_title} ((CONTINUED))"
+
+			embed = discord.Embed(title=discord_message_title,description=discord_message[i*discord_embed_char_limit:i*discord_embed_char_limit + discord_embed_char_limit], color=0xff4949)
+			await discordChannel.send(embed=embed)
 
 	bot.run(TOKEN)
 
